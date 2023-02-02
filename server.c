@@ -6,30 +6,86 @@
 #include <arpa/inet.h>
 #include <pthread.h>
 
+#define MAX_CLIENTS 10
 #define BUFFER_SIZE 1024
 
-void *receive_message(void *arg)
+struct client_data
 {
-    int client_socket = *(int *)arg;
+    int socket;
+    char name[BUFFER_SIZE];
+};
+pthread_mutex_t clients_mutex = PTHREAD_MUTEX_INITIALIZER;
+struct client_data clients[MAX_CLIENTS];
+
+
+void *handle_client(void *arg)
+{
+    struct client_data *client = (struct client_data *)arg;
 
     char message[BUFFER_SIZE];
     int read_size;
 
-    while ((read_size = recv(client_socket, message, BUFFER_SIZE, 0)) > 0)
+    while ((read_size = recv(client->socket, message, BUFFER_SIZE, 0)) > 0)
     {
         message[read_size] = '\0';
-        printf("%s", message);
+
+       
+
+        if (strcmp(message, "/exit\n") == 0 || strcmp(message, "/quit\n") == 0 || strcmp(message, "/part\n") == 0)
+        {
+            break;
+        }
+
+        printf("%s: %s\n", client->name, message);
+
+        pthread_mutex_lock(&clients_mutex);
+
+        char *message2 = malloc(strlen(client->name) + strlen(message) + 2);
+        strcat(message2, client->name);
+        strcat(message2, ": ");
+        strcat(message2, message);
+
+        for (int i = 0; i < MAX_CLIENTS; i++)
+        {
+            if (clients[i].socket != 0 && clients[i].socket != client->socket)
+            {
+                send(clients[i].socket, message2, strlen(message2), 0);
+            }
+        }
+
+        pthread_mutex_unlock(&clients_mutex);
     }
+
+    pthread_mutex_lock(&clients_mutex);
+
+    for (int i = 0; i < MAX_CLIENTS; i++)
+    {
+        if (clients[i].socket == client->socket)
+        {
+            clients[i].socket = 0;
+            break;
+        }
+    }
+
+    pthread_mutex_unlock(&clients_mutex);
+
+    printf("%s has left!!!\n", client->name);
+
+    close(client->socket);
 
     return NULL;
 }
 
 int main(int argc, char *argv[])
 {
-    int client_socket;
-    struct sockaddr_in server_address;
+    printf("Chatroom server started Successfully...\n");
+    int server_socket, client_socket;
+    struct sockaddr_in server_address, client_address;
+    socklen_t client_len;
+    pthread_t client_thread;
+    // printf("Starting chatroom server...\n");
 
-    if ((client_socket = socket(AF_INET, SOCK_STREAM, 0)) == -1)
+    if ((server_socket = socket(AF_INET, SOCK_STREAM, 0)) == -1)
     {
         perror("socket");
         exit(EXIT_FAILURE);
@@ -38,42 +94,48 @@ int main(int argc, char *argv[])
     memset(&server_address, 0, sizeof(server_address));
     server_address.sin_family = AF_INET;
     server_address.sin_port = htons(8888);
-    server_address.sin_addr.s_addr = inet_addr("127.0.0.1");
+    server_address.sin_addr.s_addr = htonl(INADDR_ANY);
 
-    if (connect(client_socket, (struct sockaddr *)&server_address, sizeof(server_address)) == -1)
+    if (bind(server_socket, (struct sockaddr *)&server_address, sizeof(server_address)) == -1)
     {
-        perror("connect");
+        perror("bind");
         exit(EXIT_FAILURE);
     }
 
-    pthread_t receive_thread;
-
-    if (pthread_create(&receive_thread, NULL, receive_message, &client_socket) != 0)
+    if (listen(server_socket, MAX_CLIENTS) == -1)
     {
-        perror("pthread_create");
+        perror("listen");
         exit(EXIT_FAILURE);
     }
 
-    char message[BUFFER_SIZE];
-    int message_len;
+    memset(clients, 0, sizeof(clients));
 
-    while (fgets(message, BUFFER_SIZE, stdin) != NULL)
+    int next_client = 0;
+
+    while (1)
     {
-        message_len = strlen(message);
-
-        if (send(client_socket, message, message_len, 0) != message_len)
+        client_len = sizeof(client_address);
+        if ((client_socket = accept(server_socket, (struct sockaddr *)&client_address, &client_len)) == -1)
         {
-            perror("send");
+            perror("accept");
             exit(EXIT_FAILURE);
         }
 
-        if (strcmp(message, "/exit\n") == 0 || strcmp(message, "/quit\n") == 0 || strcmp(message, "/part\n") == 0)
+        clients[next_client].socket = client_socket;
+        sprintf(clients[next_client].name, "Client %d", next_client + 1);
+
+        printf("%s has joined!!\n", clients[next_client].name);
+
+        if (pthread_create(&client_thread, NULL, handle_client, &clients[next_client]) != 0)
         {
-            break;
+            perror("pthread_create");
+            exit(EXIT_FAILURE);
         }
+
+        next_client = (next_client + 1) % MAX_CLIENTS;
     }
 
-    close(client_socket);
+    close(server_socket);
 
     return 0;
 }
